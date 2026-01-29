@@ -31,6 +31,8 @@ from dotenv import load_dotenv
 # Crawl4AI imports
 from crawl4ai import AsyncWebCrawler, BrowserConfig
 
+from tools.io_utils import append_jsonl, ensure_out_dir, now_et_iso, write_json
+
 # Load .env from the project folder (or wherever this script lives)
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -496,9 +498,9 @@ async def build_calendar(days: int) -> List[EconEvent]:
     return events
 
 
-def print_macro_dashboard(fred: FREDClient):
-    rows = []
-    vals = {}
+def build_macro_dashboard(fred: FREDClient) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    vals: Dict[str, Optional[float]] = {}
 
     def f2(x):
         return "" if x is None else f"{x:.2f}"
@@ -507,19 +509,68 @@ def print_macro_dashboard(fred: FREDClient):
         last, prev, last_date = fred.latest_two(sid)
         vals[sid] = last
         delta = None if (last is None or prev is None) else (last - prev)
-        rows.append([sid, label, last_date, f2(last), f2(prev), f2(delta)])
+        rows.append({
+            "id": sid,
+            "series": label,
+            "last_date": last_date or "",
+            "last": f2(last),
+            "prev": f2(prev),
+            "delta": f2(delta),
+        })
 
     spreads = compute_spreads(vals)
     for k, v in spreads.items():
-        rows.append([k, "Spread", "", f2(v), "", ""])
+        rows.append({
+            "id": k,
+            "series": "Spread",
+            "last_date": "",
+            "last": f2(v),
+            "prev": "",
+            "delta": "",
+        })
+    return rows
 
+
+def print_macro_dashboard(fred: FREDClient) -> List[Dict[str, str]]:
+    rows = build_macro_dashboard(fred)
     print("\n" + "="*96)
     print("MACRO DASHBOARD (FRED latest)")
     print("="*96)
-    print(tabulate(rows, headers=["ID", "Series", "Last Date", "Last", "Prev", "Delta"], tablefmt="github"))
+    print(tabulate(
+        [
+            [r["id"], r["series"], r["last_date"], r["last"], r["prev"], r["delta"]]
+            for r in rows
+        ],
+        headers=["ID", "Series", "Last Date", "Last", "Prev", "Delta"],
+        tablefmt="github",
+    ))
+    return rows
 
 
-def print_events(events: List[EconEvent], fred: Optional[FREDClient] = None):
+def build_upcoming_events(events: List[EconEvent], fred: Optional[FREDClient] = None) -> List[Dict[str, object]]:
+    upcoming: List[Dict[str, object]] = []
+    for e in events:
+        latest_data: Dict[str, object] = {}
+        if fred and e.fred_series:
+            for sid in e.fred_series:
+                last, prev, last_date = fred.latest_two(sid)
+                latest_data[sid] = {
+                    "last": last,
+                    "prev": prev,
+                    "last_date": last_date,
+                }
+        upcoming.append({
+            "tier": e.tier,
+            "time_et": e.dt.strftime("%Y-%m-%d %I:%M%p"),
+            "event": e.name,
+            "source": e.source,
+            "tags": e.tags,
+            "latest_data": latest_data,
+        })
+    return upcoming
+
+
+def print_events(events: List[EconEvent], fred: Optional[FREDClient] = None) -> List[Dict[str, object]]:
     rows = []
     for e in events:
         series_str = ""
@@ -527,11 +578,11 @@ def print_events(events: List[EconEvent], fred: Optional[FREDClient] = None):
             # Display up to 2 series to keep table clean
             items = []
             for sid in e.fred_series[:2]:
-                last, _, last_date = fred.latest_two(sid)
+                last, _, _ = fred.latest_two(sid)
                 if last is not None:
                     items.append(f"{sid}:{last:.2f}")
             series_str = " | ".join(items)
-            
+
         rows.append([
             e.tier,
             e.dt.strftime("%Y-%m-%d %I:%M%p"),
@@ -545,6 +596,7 @@ def print_events(events: List[EconEvent], fred: Optional[FREDClient] = None):
     print("UPCOMING EVENTS (Tier 1 = High Impact)")
     print("="*96)
     print(tabulate(rows, headers=["Tier", "Time (ET)", "Event", "Source", "Tags", "Latest Data"], tablefmt="github"))
+    return build_upcoming_events(events, fred=fred)
 
 
 def main():
@@ -552,8 +604,12 @@ def main():
     ap.add_argument("--days", type=int, default=60, help="Lookahead window in days")
     ap.add_argument("--no-fred", action="store_true", help="Skip FRED value fetch")
     ap.add_argument("--today", action="store_true", help="Show events for the next 24 hours only")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write calendar JSON to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write calendar events JSONL to a path")
     args = ap.parse_args()
 
+    out_dir = ensure_out_dir(args.out_dir)
     fred = None
     if not args.no_fred:
         fred_key = os.getenv("FRED_API_KEY", "").strip()
@@ -564,9 +620,31 @@ def main():
     
     events = asyncio.run(build_calendar(lookahead))
 
+    macro_dashboard = []
     if fred:
-        print_macro_dashboard(fred)
-    print_events(events, fred=fred)
+        macro_dashboard = print_macro_dashboard(fred)
+    upcoming_events = print_events(events, fred=fred)
+
+    if args.out_json or args.out_jsonl:
+        meta_date = datetime.now(NY).strftime("%Y-%m-%d")
+        payload = {
+            "meta": {
+                "source_script": "econ_calender.py",
+                "generated_at_et": now_et_iso(),
+                "date": meta_date,
+                "asof_et": "",
+                "run_id": f"{meta_date}_unknown_econ_calender.py",
+                "days": lookahead,
+            },
+            "macro_dashboard": macro_dashboard,
+            "upcoming_events": upcoming_events,
+        }
+        if args.out_json:
+            write_json(Path(args.out_json), payload)
+        if args.out_jsonl:
+            for event in upcoming_events:
+                append_target = Path(args.out_jsonl)
+                append_jsonl(append_target, {"meta": payload["meta"], **event})
 
 
 if __name__ == "__main__":

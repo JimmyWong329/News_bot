@@ -35,6 +35,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
+from tools.io_utils import append_jsonl, ensure_out_dir, now_et_iso, write_json
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -355,6 +357,13 @@ def compute_ago(update_dt: datetime, asof_dt: datetime) -> str:
     return f"{hours}h {minutes_rem}m Ago"
 
 
+def extract_key_points(text: str, limit: int = 6) -> List[str]:
+    if not text:
+        return []
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", text) if p.strip()]
+    return parts[:limit]
+
+
 def filter_updates_by_et_day(updates: List[LiveUpdate], target_date: str) -> List[LiveUpdate]:
     kept = []
     for u in updates:
@@ -523,8 +532,13 @@ async def main():
     ap.add_argument("--scroll_rounds", type=int, default=6)
     ap.add_argument("--asof", type=str, default="", help="Calculate relative times from this date/time (YYYY-MM-DD HH:MM)")
     ap.add_argument("--strict_date", type=int, default=1, help="1=require exact date match, 0=allow closest")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write articles JSON to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write articles JSONL to a path")
+    ap.add_argument("--out_raw_html", type=str, default="", help="Write raw HTML to a path")
     args = ap.parse_args()
 
+    out_dir = ensure_out_dir(args.out_dir)
     target_date = args.date.strip() or datetime.now(NY).strftime("%Y-%m-%d")
 
     url = discover_live_updates_url(target_date=target_date, query=args.query, strict_date=bool(args.strict_date))
@@ -538,6 +552,19 @@ async def main():
         load_more_clicks=args.load_more_clicks,
         scroll_rounds=args.scroll_rounds,
     )
+
+    raw_html_path = ""
+    if args.out_raw_html:
+        raw_path = Path(args.out_raw_html)
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(html, encoding="utf-8")
+        raw_html_path = str(raw_path)
+    elif args.out_json or args.out_jsonl:
+        safe_asof = (args.asof.replace(":", "") if args.asof else "0000")
+        raw_path = out_dir / "raw" / f"cnbc_{target_date}_{safe_asof}.html"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(html, encoding="utf-8")
+        raw_html_path = str(raw_path)
 
     meta, updates = extract_from_jsonld(html)
     
@@ -562,6 +589,35 @@ async def main():
         p = Path(args.out_txt)
         p.write_text(out, encoding="utf-8")
         print(f"[saved] {p.resolve()}")
+
+    if args.out_json or args.out_jsonl:
+        meta_date = target_date
+        meta_block = {
+            "source_script": "cnbc.py",
+            "generated_at_et": now_et_iso(),
+            "date": meta_date,
+            "asof_et": args.asof,
+            "run_id": f"{meta_date}_{args.asof or 'unknown'}_cnbc.py",
+        }
+        articles = []
+        for update in updates:
+            articles.append({
+                "meta": meta_block,
+                "source": "cnbc",
+                "phase": "INTRADAY_UPDATE",
+                "published_at_et": update.time_iso or "",
+                "url": update.url or "",
+                "title": update.headline or "",
+                "key_points": extract_key_points(update.text or ""),
+                "tickers_mentioned": [],
+                "raw_html_path": raw_html_path,
+                "raw_text_excerpt": (update.text or "")[:500],
+            })
+        if args.out_json:
+            write_json(Path(args.out_json), {"meta": meta_block, "articles": articles})
+        if args.out_jsonl:
+            for article in articles:
+                append_jsonl(Path(args.out_jsonl), article)
 
 
 if __name__ == "__main__":
