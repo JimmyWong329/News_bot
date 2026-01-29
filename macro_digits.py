@@ -747,22 +747,13 @@ def main():
     ap.add_argument("--basket-size", type=int, default=50, help="Breadth basket size (default 50)")
     ap.add_argument("--no-breadth", action="store_true", help="Skip breadth computation (faster)")
     ap.add_argument("--json", action="store_true", help="Also write JSON output to out/")
-    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
     ap.add_argument("--out_json", type=str, default=None, help="Write structured JSON output to a specific path")
-    ap.add_argument("--out_jsonl", type=str, default=None, help="Write JSONL output (unused; reserved)")
     ap.add_argument("--asof", type=str, default=None, help="Replay as-of time in ET (HH:MM). Example: --asof 09:25")
     ap.add_argument("--date", type=str, default=None, help="Historical date YYYY-MM-DD (defaults to today)")
     args = ap.parse_args()
 
     load_dotenv()
-    out_json = getattr(args, "out_json", None)
-    out_dir_arg = getattr(args, "out_dir", None) or "out"
-    out_json_path = Path(out_json) if out_json else None
-    if out_json_path:
-        out_json_path.parent.mkdir(parents=True, exist_ok=True)
-        out_dir = ensure_out_dir(out_json_path.parent)
-    else:
-        out_dir = ensure_out_dir(out_dir_arg)
+    out_dir = ensure_out_dir(args.out_dir)
 
     # Capture run time immediately
     t_run = now_ny()
@@ -968,26 +959,16 @@ def main():
         }
         for r in quote_rows
     ]
-    premarket_returns_pct = {sym: prem_rets.get(f"{sym}_prem_ret") for sym in (futures + proxies + sectors)}
-    meta_date = ref_dt.strftime("%Y-%m-%d")
-    meta_asof = t_asof.strftime("%H:%M")
     out_json_payload = {
-        "meta": {
-            "source_script": "macro_digits.py",
-            "generated_at_et": now_et_iso(),
-            "date": meta_date,
-            "asof_et": meta_asof,
-            "run_id": f"{meta_date}_{meta_asof}_macro_digits.py",
-        },
         "run_meta": {
-            "date": meta_date,
-            "asof": meta_asof,
+            "date": ref_dt.strftime("%Y-%m-%d"),
+            "asof": t_asof.strftime("%H:%M"),
             "window": {"start_et": t_start.isoformat(), "end_et": t_end.isoformat()},
             "mode": mode,
         },
         "raw_quotes": raw_quotes,
-        "premarket_returns_pct": premarket_returns_pct,
-        "premarket_range_position": range_results,
+        "premarket_returns_pct": {k: v for k, v in prem_rets.items()},
+        "range_position": range_results,
         "open_shock": shock_results,
         "sector_rotation_pp": {
             "XLK_minus_XLP": XLK_minus_XLP,
@@ -1034,9 +1015,11 @@ def main():
         fn.write_text(json.dumps(payload, indent=2))
         print(f"\n✅ Wrote: {fn}")
 
-    if out_json_path:
-        write_json(out_json_path, out_json_payload)
-        print(f"\n✅ Wrote: {out_json_path}")
+    if args.out_json:
+        out_path = Path(args.out_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(out_json_payload, indent=2))
+        print(f"\n✅ Wrote: {out_path}")
 
     print("\nDone.\n")
 
