@@ -21,12 +21,15 @@ Run:
 import argparse
 import asyncio
 import re
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+from tools.io_utils import append_jsonl, ensure_out_dir, now_et_iso, write_json
 
 
 LISTING_URL = "https://www.fidelity.com/news/us-markets"
@@ -100,8 +103,14 @@ async def main():
     ap.add_argument("--headless", type=int, default=1)
     ap.add_argument("--debug_html", default="")
     ap.add_argument("--debug_article_html", default="")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write article JSON to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write article JSONL to a path")
+    ap.add_argument("--out_raw_html", type=str, default="", help="Write raw HTML to a path")
+    ap.add_argument("--date", type=str, default="", help="Override date YYYY-MM-DD for metadata")
     args = ap.parse_args()
 
+    out_dir = ensure_out_dir(args.out_dir)
     browser_cfg = BrowserConfig(
         headless=bool(args.headless),
         browser_type="chromium",
@@ -168,6 +177,45 @@ async def main():
         print("=" * 100)
         print(text if text else "[No article text extracted -- run with --headless 0 and --debug_article_html to inspect HTML.]")
         print("=" * 100)
+
+        raw_html_path = ""
+        if args.out_raw_html:
+            raw_path = Path(args.out_raw_html)
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(article_html, encoding="utf-8")
+            raw_html_path = str(raw_path)
+        elif args.out_json or args.out_jsonl:
+            meta_date = args.date.strip() or datetime.now().strftime("%Y-%m-%d")
+            raw_path = out_dir / "raw" / f"fid_{meta_date}_0000.html"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(article_html, encoding="utf-8")
+            raw_html_path = str(raw_path)
+
+        if args.out_json or args.out_jsonl:
+            meta_date = args.date.strip() or datetime.now().strftime("%Y-%m-%d")
+            meta = {
+                "source_script": "fid.py",
+                "generated_at_et": now_et_iso(),
+                "date": meta_date,
+                "asof_et": "",
+                "run_id": f"{meta_date}_unknown_fid.py",
+            }
+            article_obj = {
+                "meta": meta,
+                "source": "fid",
+                "phase": "UNKNOWN",
+                "published_at_et": "",
+                "url": article_url,
+                "title": "",
+                "key_points": [],
+                "tickers_mentioned": [],
+                "raw_html_path": raw_html_path,
+                "raw_text_excerpt": text[:500],
+            }
+            if args.out_json:
+                write_json(Path(args.out_json), article_obj)
+            if args.out_jsonl:
+                append_jsonl(Path(args.out_jsonl), article_obj)
 
 
 if __name__ == "__main__":

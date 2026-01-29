@@ -70,6 +70,8 @@ OUT = Path("out")
 OUT.mkdir(exist_ok=True)
 LOG = OUT / "news_log.jsonl"
 
+from tools.io_utils import ensure_out_dir, now_et_iso, write_json
+
 FINVIZ_QUOTE_URL = "https://finviz.com/quote.ashx?t={}&p=d"
 
 # SPY + MAG7 (plus GOOG alias)
@@ -409,8 +411,12 @@ async def main():
     ap.add_argument("--ticker", type=str, default=None, help="Crawl specific ticker(s).")
     ap.add_argument("--print", type=int, default=30, help="How many ranked headlines to print.")
     ap.add_argument("--api-key", type=str, default=os.getenv("GEMINI_API_KEY"), help="Google Gemini API Key. Defaults to env var.")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write headlines JSON to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write headlines JSONL to a path")
     args = ap.parse_args()
 
+    out_dir = ensure_out_dir(args.out_dir)
     # Determine targets
     if args.ticker:
         tickers = [t.strip().upper() for t in args.ticker.split(',')]
@@ -589,6 +595,47 @@ async def main():
             print(f"    Mech: {h.get('mechanism')}")
             print(f"    Watch: {h.get('watch_next')}")
             print(f"    Link: {h['url']}\n")
+
+        if args.out_json or args.out_jsonl:
+            meta_date = datetime.now(NY_TZ).strftime("%Y-%m-%d")
+            meta = {
+                "source_script": "news_catalysts.py",
+                "generated_at_et": now_et_iso(),
+                "date": meta_date,
+                "asof_et": "",
+                "run_id": f"{meta_date}_unknown_news_catalysts.py",
+            }
+            payload_items = []
+            for h in candidates:
+                time_et = ""
+                if h.get("published_iso"):
+                    try:
+                        dt = datetime.fromisoformat(h["published_iso"])
+                        dt = dt.astimezone(NY_TZ) if dt.tzinfo else NY_TZ.localize(dt)
+                        time_et = dt.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        time_et = ""
+                payload_items.append({
+                    "meta": meta,
+                    "ticker": "NVDA",
+                    "time_et": time_et,
+                    "headline": h.get("title") or "",
+                    "link": h.get("url") or "",
+                    "event_type": h.get("ai_category") or "",
+                    "scores": {
+                        "score": int(h.get("trade_score", 0) or 0),
+                        "materiality": int(h.get("materiality", 0) or 0),
+                        "immediacy": int(h.get("immediacy", 0) or 0),
+                        "priced_in_pct": int(h.get("priced_in", 0) or 0),
+                    },
+                    "mechanism": h.get("mechanism") or "",
+                    "watch": h.get("watch_next") or "",
+                })
+            if args.out_json:
+                write_json(Path(args.out_json), {"meta": meta, "headlines": payload_items})
+            if args.out_jsonl:
+                for item in payload_items:
+                    append_jsonl(Path(args.out_jsonl), item)
 
         event = {
             "fetched_utc": utc_now_iso(),

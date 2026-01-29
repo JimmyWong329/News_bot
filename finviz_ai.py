@@ -1,16 +1,29 @@
+import argparse
 import asyncio
 import re
 import json
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright
 
-FINVIZ_HOME = "https://finviz.com/"
+from tools.io_utils import ensure_out_dir, now_et_iso, write_json
 
-async def main(headless: bool = False):
-    Path("out").mkdir(exist_ok=True)
+FINVIZ_HOME = "https://finviz.com/"
+NY_TZ = ZoneInfo("America/New_York")
+
+async def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--headless", type=int, default=0)
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write digest JSON to a path")
+    ap.add_argument("--date", type=str, default="", help="Override date YYYY-MM-DD for metadata")
+    args = ap.parse_args()
+
+    out_dir = ensure_out_dir(args.out_dir)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+        browser = await p.chromium.launch(headless=bool(args.headless))
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -59,8 +72,9 @@ async def main(headless: bool = False):
             print("Timed out waiting for 'Daily Digest' text. Taking screenshot.")
 
         # Optional: proof screenshot
-        await page.screenshot(path="out/finviz_after_click.png", full_page=True)
-        print("Saved screenshot to out/finviz_after_click.png")
+        screenshot_path = out_dir / "finviz_after_click.png"
+        await page.screenshot(path=str(screenshot_path), full_page=True)
+        print(f"Saved screenshot to {screenshot_path}")
 
         # 5) Extract from the LIVE DOM via evaluate (most reliable)
         data = await page.evaluate(r"""
@@ -90,7 +104,7 @@ async def main(headless: bool = False):
 """)
 
         if not data or not data.get("bullets"):
-            print("Clicked, but couldn't find bullets. Check screenshot: out/finviz_after_click.png")
+            print(f"Clicked, but couldn't find bullets. Check screenshot: {screenshot_path}")
         else:
             print("\nDAILY DIGEST")
             print("-----------")
@@ -99,10 +113,27 @@ async def main(headless: bool = False):
             for b in data["bullets"]:
                 print("-", b)
 
-            Path("out/digest.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
-            print("\nSaved: out/digest.json")
+            legacy_path = out_dir / "digest.json"
+            legacy_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            print(f"\nSaved: {legacy_path}")
+
+            if args.out_json:
+                meta_date = args.date.strip() or datetime.now(NY_TZ).strftime("%Y-%m-%d")
+                payload = {
+                    "meta": {
+                        "source_script": "finviz_ai.py",
+                        "generated_at_et": now_et_iso(),
+                        "date": meta_date,
+                        "asof_et": "",
+                        "run_id": f"{meta_date}_unknown_finviz_ai.py",
+                    },
+                    "title": data.get("title") or "DAILY DIGEST",
+                    "bullets": data.get("bullets") or [],
+                    "raw_text": "\n".join(data.get("bullets") or []),
+                }
+                write_json(args.out_json, payload)
 
         await browser.close()
 
 if __name__ == "__main__":
-    asyncio.run(main(headless=False))
+    asyncio.run(main())
