@@ -12,6 +12,8 @@ import numpy as np
 import pytz
 from dotenv import load_dotenv
 
+from tools.io_utils import ensure_out_dir, now_et_iso, write_json
+
 # Yahoo Finance
 import yfinance as yf
 
@@ -751,6 +753,7 @@ def main():
     args = ap.parse_args()
 
     load_dotenv()
+    out_dir = ensure_out_dir(args.out_dir)
 
     # Capture run time immediately
     t_run = now_ny()
@@ -1008,7 +1011,7 @@ def main():
     }
 
     if args.json:
-        fn = OUT_DIR / f"premarket_context_{t_run.strftime('%Y%m%d_%H%M%S')}.json"
+        fn = out_dir / f"premarket_context_{t_run.strftime('%Y%m%d_%H%M%S')}.json"
         fn.write_text(json.dumps(payload, indent=2))
         print(f"\n✅ Wrote: {fn}")
 

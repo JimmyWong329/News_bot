@@ -3,12 +3,16 @@ import argparse
 import asyncio
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+from tools.io_utils import append_jsonl, ensure_out_dir, now_et_iso, write_json
 
 
 FJ_HOME_URL = "https://www.financialjuice.com/home"
@@ -85,8 +89,13 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headless", type=int, default=1)
     ap.add_argument("--debug_html", type=str, default="")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write JSON output to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write JSONL output to a path")
+    ap.add_argument("--date", type=str, default="", help="Override date YYYY-MM-DD for metadata")
     args = ap.parse_args()
 
+    out_dir = ensure_out_dir(args.out_dir)
     browser_cfg = BrowserConfig(
         headless=bool(args.headless),
         text_mode=True,
@@ -138,6 +147,28 @@ async def main():
         print(out["title"])
         print(out["body"])
         print("================================\n")
+
+        if args.out_json or args.out_jsonl:
+            meta_date = args.date.strip() or datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            meta = {
+                "source_script": "fj_ai.py",
+                "generated_at_et": now_et_iso(),
+                "date": meta_date,
+                "asof_et": "",
+                "run_id": f"{meta_date}_unknown_fj_ai.py",
+            }
+            payload = {
+                "meta": meta,
+                "time_et": "",
+                "source": "financialjuice",
+                "text": f"{out['title']}\\n{out['body']}",
+                "tags": [],
+                "scope": "MACRO",
+            }
+            if args.out_json:
+                write_json(args.out_json, payload)
+            if args.out_jsonl:
+                append_jsonl(args.out_jsonl, payload)
 
 
 if __name__ == "__main__":
