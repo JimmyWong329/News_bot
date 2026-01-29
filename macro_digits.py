@@ -12,6 +12,8 @@ import numpy as np
 import pytz
 from dotenv import load_dotenv
 
+from tools.io_utils import ensure_out_dir, now_et_iso, write_json
+
 # Yahoo Finance
 import yfinance as yf
 
@@ -340,12 +342,14 @@ def compute_range_position(sym: str, t0: datetime, t_end: datetime):
     return {"sym": sym, "high": hi, "low": lo, "last": last, "range_pos": range_pos, "label": label}
 
 
-def print_range_position(symbols, t0, t_end):
+def print_range_position(symbols, t0, t_end, results=None):
     print("\n[PREMARKET RANGE POSITION]  (04:00 -> asof)")
-    for sym in symbols:
-        r = compute_range_position(sym, t0, t_end)
+    if results is None:
+        results = [compute_range_position(sym, t0, t_end) for sym in symbols]
+    for r in results:
         rp = r["range_pos"]
         rp_str = f"{rp:.3f}" if rp is not None else "NA"
+        sym = r.get("sym", "")
         print(
             f"  {sym:7s} | High={fmt(r['high'],4)} Low={fmt(r['low'],4)} Last={fmt(r['last'],4)} "
             f"| RangePos={rp_str:>5s} | {r['label']}"
@@ -413,13 +417,15 @@ def compute_shock(sym: str, t0: datetime, asof: datetime,
             "late_window": f"{shock_start.strftime('%H:%M')}->{late_end.strftime('%H:%M')}"}
 
 
-def print_shock(symbols, t0, asof):
+def print_shock(symbols, t0, asof, results=None):
     print("\n[OPEN SHOCK DETECTOR]  (compare 04:00->08:55 vs 08:55->09:25)")
-    for sym in symbols:
-        s = compute_shock(sym, t0, asof)
+    if results is None:
+        results = [compute_shock(sym, t0, asof) for sym in symbols]
+    for s in results:
         er = fmt(s.get("early_ret"), 3) if s.get("early_ret") is not None else "NA"
         lr = fmt(s.get("late_ret"), 3) if s.get("late_ret") is not None else "NA"
         lw = s.get("late_window", "08:55->09:25")
+        sym = s.get("sym", "")
         print(f"  {sym:7s} | EarlyRet(04:00->08:55)={er:>7s}% | LateRet({lw})={lr:>7s}% | {s['label']}")
 
 
@@ -741,11 +747,22 @@ def main():
     ap.add_argument("--basket-size", type=int, default=50, help="Breadth basket size (default 50)")
     ap.add_argument("--no-breadth", action="store_true", help="Skip breadth computation (faster)")
     ap.add_argument("--json", action="store_true", help="Also write JSON output to out/")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write structured JSON output to a specific path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write JSONL output (unused; reserved)")
     ap.add_argument("--asof", type=str, default=None, help="Replay as-of time in ET (HH:MM). Example: --asof 09:25")
     ap.add_argument("--date", type=str, default=None, help="Historical date YYYY-MM-DD (defaults to today)")
     args = ap.parse_args()
 
     load_dotenv()
+    out_json = getattr(args, "out_json", None)
+    out_dir_arg = getattr(args, "out_dir", None) or "out"
+    out_json_path = Path(out_json) if out_json else None
+    if out_json_path:
+        out_json_path.parent.mkdir(parents=True, exist_ok=True)
+        out_dir = ensure_out_dir(out_json_path.parent)
+    else:
+        out_dir = ensure_out_dir(out_dir_arg)
 
     # Capture run time immediately
     t_run = now_ny()
@@ -896,10 +913,12 @@ def main():
     # ----------------------------------------------------
     # Use QQQ/SPY as primary “tone” instruments. Add futures if you want.
     tone_syms = ["QQQ", "SPY", "NQ=F", "ES=F"]
+    range_results = [compute_range_position(sym, t_start, t_end) for sym in tone_syms]
+    shock_results = [compute_shock(sym, t_start, t_end) for sym in ["QQQ", "SPY"]]
     
     # We pass t_end as the 'asof' time for consistency
-    print_range_position(tone_syms, t_start, t_end)
-    print_shock(["QQQ", "SPY"], t_start, t_end)
+    print_range_position(tone_syms, t_start, t_end, results=range_results)
+    print_shock(["QQQ", "SPY"], t_start, t_end, results=shock_results)
     # ----------------------------------------------------
 
     # Rotation + Vol
@@ -939,6 +958,57 @@ def main():
 
     # JSON output
     t_asof = t_end  # The simulated time is the end of the window
+    raw_quotes = [
+        {
+            "symbol": r.symbol,
+            "prev_close": r.prev_close,
+            "last": r.last,
+            "chg": r.chg,
+            "pct_vs_prev": r.pct,
+        }
+        for r in quote_rows
+    ]
+    premarket_returns_pct = {sym: prem_rets.get(f"{sym}_prem_ret") for sym in (futures + proxies + sectors)}
+    meta_date = ref_dt.strftime("%Y-%m-%d")
+    meta_asof = t_asof.strftime("%H:%M")
+    out_json_payload = {
+        "meta": {
+            "source_script": "macro_digits.py",
+            "generated_at_et": now_et_iso(),
+            "date": meta_date,
+            "asof_et": meta_asof,
+            "run_id": f"{meta_date}_{meta_asof}_macro_digits.py",
+        },
+        "run_meta": {
+            "date": meta_date,
+            "asof": meta_asof,
+            "window": {"start_et": t_start.isoformat(), "end_et": t_end.isoformat()},
+            "mode": mode,
+        },
+        "raw_quotes": raw_quotes,
+        "premarket_returns_pct": premarket_returns_pct,
+        "premarket_range_position": range_results,
+        "open_shock": shock_results,
+        "sector_rotation_pp": {
+            "XLK_minus_XLP": XLK_minus_XLP,
+            "XLK_minus_XLI": XLK_minus_XLI,
+        },
+        "vol": {
+            "VIX_pct_vs_prev": vix_pct_vs_prev,
+            "VX1_pct_vs_prev": vx_pct_vs_prev,
+        },
+        "fred_macro": {
+            "DGS10_latest": DGS10_latest,
+            "DGS10_chg": DGS10_chg,
+            "HY_OAS_latest": HY_latest,
+            "HY_OAS_chg": HY_chg,
+            "BAA10YM_latest": BAA_latest,
+            "BAA10YM_chg": BAA_chg,
+        },
+        "breadth_proxy": breadth,
+        "composite_score": {"score_0_100": score_0_100, "label": label},
+        "components_risk_off_0_1": comps,
+    }
     payload = {
         "run_time_ny": t_run.isoformat(),
         "asof_time_ny": t_asof.isoformat(),
@@ -960,9 +1030,13 @@ def main():
     }
 
     if args.json:
-        fn = OUT_DIR / f"premarket_context_{t_run.strftime('%Y%m%d_%H%M%S')}.json"
+        fn = out_dir / f"premarket_context_{t_run.strftime('%Y%m%d_%H%M%S')}.json"
         fn.write_text(json.dumps(payload, indent=2))
         print(f"\n✅ Wrote: {fn}")
+
+    if out_json_path:
+        write_json(out_json_path, out_json_payload)
+        print(f"\n✅ Wrote: {out_json_path}")
 
     print("\nDone.\n")
 

@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 import pytz
 
+from tools.io_utils import ensure_out_dir, now_et_iso, write_json
+
 
 #(taenv) jordo@Gideon:~/news_crawler$ python fjc.py --mode day --fj_date 2026-01-23 --raw_only --raw_source fj
 ''') Default (LIVE mode, one-shot)
@@ -131,6 +133,17 @@ KEY_EVENT_WORDS = [
     "forecast","outlook","margin","layoffs","buyback","dividend",
     "fed","rates","cpi","jobs","tariff","sanction","war","geopolitical","inflation","recession"
 ]
+
+
+def infer_scope(item: Dict[str, Any]) -> str:
+    category = (item.get("category") or item.get("ai_category") or "").lower()
+    if "macro" in category:
+        return "MACRO"
+    if item.get("tickers"):
+        return "TICKER"
+    if item.get("sector"):
+        return "SECTOR"
+    return "UNKNOWN"
 
 # -----------------------------
 # Your regime prompt (embedded exactly, used for reference / schema)
@@ -1428,6 +1441,39 @@ async def run_once(
             print(f"    {url}")
     print("-" * 30)
 
+    if args.out_json or args.out_jsonl:
+        meta_date = args.fj_target_date.strftime("%Y-%m-%d") if args.fj_target_date else now_ny().strftime("%Y-%m-%d")
+        meta = {
+            "source_script": "US_News.py",
+            "generated_at_et": now_et_iso(),
+            "date": meta_date,
+            "asof_et": "",
+            "run_id": f"{meta_date}_unknown_US_News.py",
+        }
+        headlines_payload = []
+        for it in items:
+            tags = []
+            if it.get("category"):
+                tags.append(it.get("category"))
+            if it.get("source"):
+                tags.append(it.get("source"))
+            if it.get("tickers"):
+                tags.extend(it.get("tickers"))
+            tags = [t for t in tags if t]
+            headlines_payload.append({
+                "meta": meta,
+                "time_et": it.get("timestamp_et") or "",
+                "source": it.get("source") or "",
+                "text": it.get("headline") or "",
+                "tags": tags,
+                "scope": infer_scope(it),
+            })
+        if args.out_json:
+            write_json(Path(args.out_json), {"meta": meta, "headlines": headlines_payload})
+        if args.out_jsonl:
+            for entry in headlines_payload:
+                append_jsonl(Path(args.out_jsonl), entry)
+
     regime = classify_regime(items)
 
     append_jsonl(
@@ -1502,6 +1548,9 @@ async def main():
         default=120,
         help="FinancialJuice JS scroll attempts for fallback loop (default 120).",
     )
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write headlines JSON to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write headlines JSONL to a path")
 
 
     ap.add_argument("--api-key", type=str, default=os.getenv("GEMINI_API_KEY", ""))
@@ -1526,6 +1575,7 @@ async def main():
     )
 
     args = ap.parse_args()
+    out_dir = ensure_out_dir(args.out_dir)
 
     # target date for FinancialJuice (default: today NY)
     args.fj_target_date = (
