@@ -25,6 +25,8 @@ from bs4 import BeautifulSoup
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
+from tools.io_utils import append_jsonl, ensure_out_dir, now_et_iso, write_json
+
 HUB_URL = "https://apnews.com/hub/financial-markets"
 NY = ZoneInfo("America/New_York")
 
@@ -199,8 +201,13 @@ async def main():
     ap.add_argument("--max_items", type=int, default=60)
     # New argument for filtering by date
     ap.add_argument("--date", type=str, default="", help="Target date YYYY-MM-DD (default: today)")
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write article JSON to a path")
+    ap.add_argument("--out_jsonl", type=str, default=None, help="Write article JSONL to a path")
+    ap.add_argument("--out_raw_html", type=str, default="", help="Write raw HTML to a path")
     args = ap.parse_args()
 
+    out_dir = ensure_out_dir(args.out_dir)
     # Determine target date
     if args.date.strip():
         target_date = args.date.strip()
@@ -244,6 +251,43 @@ async def main():
     print()
     print(body if body else "[No body parsed — open out_ap_article.html and we’ll adjust selectors.]")
     print()
+
+    raw_html_path = ""
+    if args.out_raw_html:
+        raw_path = Path(args.out_raw_html)
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(article_html, encoding="utf-8")
+        raw_html_path = str(raw_path)
+    elif args.out_json or args.out_jsonl:
+        raw_path = out_dir / "raw" / f"apnews_{target_date}_0000.html"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(article_html, encoding="utf-8")
+        raw_html_path = str(raw_path)
+
+    if args.out_json or args.out_jsonl:
+        meta = {
+            "source_script": "apnews.py",
+            "generated_at_et": now_et_iso(),
+            "date": target_date,
+            "asof_et": "",
+            "run_id": f"{target_date}_unknown_apnews.py",
+        }
+        article_obj = {
+            "meta": meta,
+            "source": "apnews",
+            "phase": "UNKNOWN",
+            "published_at_et": chosen_date,
+            "url": chosen.url,
+            "title": title or chosen.title,
+            "key_points": [],
+            "tickers_mentioned": [],
+            "raw_html_path": raw_html_path,
+            "raw_text_excerpt": (body or "")[:500],
+        }
+        if args.out_json:
+            write_json(Path(args.out_json), article_obj)
+        if args.out_jsonl:
+            append_jsonl(Path(args.out_jsonl), article_obj)
 
 if __name__ == "__main__":
     asyncio.run(main())

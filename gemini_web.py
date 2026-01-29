@@ -1,32 +1,17 @@
+import argparse
 import os
 from pathlib import Path
 from datetime import datetime, time
-import pytz
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv, find_dotenv
 
 from google import genai
 from google.genai import types
 
-# --- Load .env safely ---
-dotenv_path = find_dotenv(usecwd=True) or (Path.cwd() / ".env")
-load_dotenv(dotenv_path=dotenv_path, override=True)
+from tools.io_utils import ensure_out_dir, now_et_iso, write_json
 
-key = os.getenv("GEMINI_API_KEY", "").strip()
-if not key:
-    raise RuntimeError(f"GEMINI_API_KEY not found. Checked: {dotenv_path}")
+NY = ZoneInfo("America/New_York")
 
-client = genai.Client(api_key=key)
-
-# --- Enable web search grounding ---
-grounding_tool = types.Tool(google_search=types.GoogleSearch())
-
-config = types.GenerateContentConfig(
-    tools=[grounding_tool],
-    temperature=0.2,
-)
-
-# --- Session-Aware Logic ---
-NY = pytz.timezone("America/New_York")
 
 def market_mode_and_window(now_et: datetime) -> tuple[str, str]:
     wd = now_et.weekday()  # Mon=0 ... Sun=6
@@ -51,18 +36,45 @@ def market_mode_and_window(now_et: datetime) -> tuple[str, str]:
     # Mon-Fri
     if cash_open <= t <= cash_close:
         return ("CASH_LIVE", "last 4 hours (intraday)")
-    else:
-        return ("OFF_HOURS", "since prior cash close + any major overnight futures moves")
+    return ("OFF_HOURS", "since prior cash close + any major overnight futures moves")
 
-# --- Calculate Context ---
-now_et = datetime.now(NY)
-mode, window = market_mode_and_window(now_et)
-as_of_et = now_et.strftime("%Y-%m-%d %I:%M %p ET")
 
-print(f"MODE: {mode} | WINDOW: {window} | AS OF: {as_of_et}")
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out_dir", type=str, default="out", help="Output directory (default: out)")
+    ap.add_argument("--out_json", type=str, default=None, help="Write summary JSON to a path")
+    ap.add_argument("--date", type=str, default="", help="Override date YYYY-MM-DD for metadata")
+    args = ap.parse_args()
 
-# --- Dynamic Prompt ---
-prompt_template = """
+    ensure_out_dir(args.out_dir)
+
+    # --- Load .env safely ---
+    dotenv_path = find_dotenv(usecwd=True) or (Path.cwd() / ".env")
+    load_dotenv(dotenv_path=dotenv_path, override=True)
+
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError(f"GEMINI_API_KEY not found. Checked: {dotenv_path}")
+
+    client = genai.Client(api_key=key)
+
+    # --- Enable web search grounding ---
+    grounding_tool = types.Tool(google_search=types.GoogleSearch())
+
+    config = types.GenerateContentConfig(
+        tools=[grounding_tool],
+        temperature=0.2,
+    )
+
+    # --- Calculate Context ---
+    now_et = datetime.now(NY)
+    mode, window = market_mode_and_window(now_et)
+    as_of_et = now_et.strftime("%Y-%m-%d %I:%M %p ET")
+
+    print(f"MODE: {mode} | WINDOW: {window} | AS OF: {as_of_et}")
+
+    # --- Dynamic Prompt ---
+    prompt_template = """
 You are a disciplined market-regime classifier.
 
 AS OF: {as_of_et}
@@ -100,26 +112,47 @@ Output Format:
 5) Watch next: 3-6 bullets (upcoming events)
 """
 
-final_prompt = prompt_template.format(as_of_et=as_of_et, window=window, mode=mode)
+    final_prompt = prompt_template.format(as_of_et=as_of_et, window=window, mode=mode)
 
-# --- Generate ---
-resp = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents=final_prompt,
-    config=config,
-)
+    # --- Generate ---
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=final_prompt,
+        config=config,
+    )
 
-print("-" * 40)
-print(resp.text)
-print("-" * 40)
+    print("-" * 40)
+    print(resp.text)
+    print("-" * 40)
 
-# --- Sanity check ---
-cand = resp.candidates[0]
-gm = getattr(cand, "grounding_metadata", None)
-if gm:
-    queries = getattr(gm, "web_search_queries", None) or []
-    print(f"\nSEARCH QUERIES USED ({len(queries)}):", queries)
-    chunks = getattr(gm, "grounding_chunks", None) or []
-    print("NUM SOURCES:", len(chunks))
-else:
-    print("\nNo grounding_metadata returned (likely no search was used).")
+    # --- Sanity check ---
+    cand = resp.candidates[0]
+    gm = getattr(cand, "grounding_metadata", None)
+    if gm:
+        queries = getattr(gm, "web_search_queries", None) or []
+        print(f"\nSEARCH QUERIES USED ({len(queries)}):", queries)
+        chunks = getattr(gm, "grounding_chunks", None) or []
+        print("NUM SOURCES:", len(chunks))
+    else:
+        print("\nNo grounding_metadata returned (likely no search was used).")
+
+    if args.out_json:
+        meta_date = args.date.strip() or now_et.strftime("%Y-%m-%d")
+        payload = {
+            "meta": {
+                "source_script": "gemini_web.py",
+                "generated_at_et": now_et_iso(),
+                "date": meta_date,
+                "asof_et": now_et.strftime("%H:%M"),
+                "run_id": f"{meta_date}_{now_et.strftime('%H:%M')}_gemini_web.py",
+            },
+            "prompt": final_prompt,
+            "model": "gemini-2.5-flash",
+            "summary": resp.text,
+            "structured": {},
+        }
+        write_json(args.out_json, payload)
+
+
+if __name__ == "__main__":
+    main()
